@@ -61,7 +61,7 @@ def pointing_correction(tile, i):
     img2 = cfg['images'][i]['img']
     rpc2 = cfg['images'][i]['rpcm']
 
-    # correct pointing error
+    # correct pointing error sift特征提取和匹配A平移矩阵 m匹配结果
     print('correcting pointing on tile {} {} pair {}...'.format(x, y, i))
     method = 'relative' if cfg['relative_sift_match_thresh'] is True else 'absolute'
     A, m = pointing_accuracy.compute_correction(
@@ -143,7 +143,8 @@ def rectification_pair(tile, i):
                     m = np.concatenate((m, m_n))
             except IOError:
                 print('%s does not exist' % sift_from_neighborhood)
-
+ 
+    # 校正的核线影像
     rect1 = os.path.join(out_dir, 'rectified_ref.tif')
     rect2 = os.path.join(out_dir, 'rectified_sec.tif')
     H1, H2, disp_min, disp_max = rectification.rectify_pair(img1, img2,
@@ -175,10 +176,10 @@ def stereo_matching(tile, i):
     x, y = tile['coordinates'][:2]
 
     print('estimating disparity on tile {} {} pair {}...'.format(x, y, i))
-    rect1 = os.path.join(out_dir, 'rectified_ref.tif')
-    rect2 = os.path.join(out_dir, 'rectified_sec.tif')
-    disp = os.path.join(out_dir, 'rectified_disp.tif')
-    mask = os.path.join(out_dir, 'rectified_mask.png')
+    rect1 = os.path.join(out_dir, 'rectified_ref.tif')#参考图
+    rect2 = os.path.join(out_dir, 'rectified_sec.tif')#第二张图
+    disp = os.path.join(out_dir, 'rectified_disp.tif') #视差图
+    mask = os.path.join(out_dir, 'rectified_mask.png')#mask
     disp_min, disp_max = np.loadtxt(os.path.join(out_dir, 'disp_min_max.txt'))
 
     block_matching.compute_disparity_map(rect1, rect2, disp, mask,
@@ -194,7 +195,10 @@ def stereo_matching(tile, i):
             common.remove(rect1)
         common.remove(rect2)
         common.remove(os.path.join(out_dir, 'disp_min_max.txt'))
-
+    
+    # 填充视差图
+    # disp_fill = os.path.join(out_dir, 'rectified_disp_fill.tif') #视差图    
+    # block_matching.insertDepth32f(disp, disp_fill)
 
 def disparity_to_height(tile, i):
     """
@@ -305,10 +309,14 @@ def disparity_to_ply(tile):
     n = cfg['3d_filtering_n']
     if r and n:
         triangulation.filter_xyz(xyz_array, r, n, cfg['gsd'])
-
+    
+    # print("Number of xyz_array rows, columns:", xyz_array.shape)    
+    # xyz_array = triangulation.points_cloud_filter(xyz_array)
+   
     proj_com = "CRS {}".format(cfg['out_crs'])
+    # triangulation.write_to_ply(ply_file, xyz_array, colors, proj_com, confidence=extra)
     triangulation.write_to_ply(ply_file, xyz_array, colors, proj_com, confidence=extra)
-
+    
     if cfg['clean_intermediate']:
         common.remove(H_ref)
         common.remove(H_sec)
@@ -443,6 +451,9 @@ def plys_to_dsm(tile):
     # compute the point cloud x, y bounds
     points, _ = ply.read_3d_point_cloud_from_ply(os.path.join(tile['dir'],
                                                               'cloud.ply'))
+    #pcl统计滤波
+    # points = triangulation.points_cloud_filter(points)
+    
     if len(points) == 0:
         return
 
@@ -474,7 +485,114 @@ def plys_to_dsm(tile):
     # so the raster has 4 or 5 columns: [z, r, g, b, confidence (optional)]
     if raster.shape[-1] == 5:
         common.rasterio_write(out_conf, raster[:, :, 4], profile=profile)
+        
+    #dsm填充漏洞
+    out_dsm_fill = os.path.join(tile['dir'], 'dsm_fill.tif')   #视差图  
+    # block_matching.insertDepth32f(out_dsm, out_dsm_fill)
+    block_matching.insertDepth32fMedian(out_dsm, out_dsm_fill)
 
+# from osgeo import gdal, osr
+import os
+import numpy as np
+from plyflatten import utils
+
+
+def pointsCloudToDSM(tile):
+    
+    out_dsm = os.path.join(tile['dir'], 'dsm.tif')
+    # out_conf = os.path.join(tile['dir'], 'confidence.tif')
+    r = cfg['dsm_resolution']
+
+    # compute the point cloud x, y bounds
+    points, _ = ply.read_3d_point_cloud_from_ply(os.path.join(tile['dir'],
+                                                              'cloud.ply'))
+    
+    if len(points) == 0:
+        return
+
+    xmin, ymin, *_ = np.min(points, axis=0)
+    xmax, ymax, *_ = np.max(points, axis=0)
+
+    # compute xoff, yoff, xsize, ysize on a grid of unit r
+    xoff = np.floor(xmin / r) * r #x方向上的最小坐标值
+    xsize = int(1 + np.floor((xmax - xoff) / r)) #宽 横向像素个数grid_count_x
+
+    yoff = np.ceil(ymax / r) * r
+    ysize = int(1 - np.floor((ymin - yoff) / r))# 高 grid_count_y
+
+    roi = xoff, yoff, xsize, ysize
+
+    clouds_list = [os.path.join(tile['dir'], n_dir, 'cloud.ply') for n_dir in tile['neighborhood_dirs']]
+    
+    
+    # -----------------
+    # read points clouds
+    full_cloud = list()
+    for cloud in clouds_list:
+        cloud_data, _ = utils.read_3d_point_cloud_from_ply(cloud)
+        full_cloud.append(cloud_data.astype(np.float64))
+
+    full_cloud = np.concatenate(full_cloud)
+
+    # region of interest (compute plyextrema if roi is None)
+    # if roi is not None:
+    #     xoff, yoff, xsize, ysize = roi
+    # else:
+    #     xx = full_cloud[:, 0]
+    #     yy = full_cloud[:, 1]
+    #     xmin = np.amin(xx)
+    #     xmax = np.amax(xx)
+    #     ymin = np.amin(yy)
+    #     ymax = np.amax(yy)
+
+    #     xoff = np.floor(xmin / r) * r
+    #     xsize = int(1 + np.floor((xmax - xoff) / r))
+
+    #     yoff = np.ceil(ymax / r) * r
+    #     ysize = int(1 - np.floor((ymin - yoff) / r))
+
+    # The copy() method will reorder to C-contiguous order by default:
+    full_cloud = full_cloud.copy()
+    sigma = float("inf") if sigma is None else sigma
+    # raster = plyflatten(full_cloud, xoff, yoff, resolution, xsize, ysize, radius, sigma)
+
+    crs, crs_type = utils.crs_from_ply(clouds_list[0])
+    crs_proj = utils.rasterio_crs(utils.crs_proj(crs, crs_type))
+
+    # construct profile dict
+    # profile = dict()
+    # profile["tiled"] = True
+    # profile["compress"] = "deflate"
+    # profile["predictor"] = 2
+    # profile["nodata"] = float("nan")
+    # profile["crs"] = crs_proj
+    # profile["transform"] = affine.Affine(resolution, 0.0, xoff, 0.0, -resolution, yoff)
+  
+    # 计算网格大小及地理投影坐标属性
+    x = full_cloud[:,0]  # 提取X值
+    y = full_cloud[:,1]  # 提取Y值
+    z = full_cloud[:,2]  # 提取Z值
+    
+    # 创建DSM输出数据集
+    # xsize = int(1 + np.floor((xmax - xoff) / r))
+    # width = int((x_max - x_min) / self.dsm_res) + 1
+    # height = int((y_max - y_min) / self.dsm_res) + 1
+    transform = rasterio.transform.from_origin(xmin, ymax, r, r)
+
+    # 初始化输出数组并进行插值操作
+    dsm_array = np.full((ysize, xsize), np.nan, dtype='float32')
+
+    # 计算在栅格中的位置
+    cols = np.floor((x - xmin) / r).astype(int)
+    rows = np.floor((ymax - y) / r).astype(int)
+    dsm_array[rows, cols] = z  # 将z值赋予对应的位置
+
+    # 产生DSM输出数据集
+    with rasterio.open(out_dsm, 'w', driver='GTiff', height=ysize, width=xsize,
+                       count=1, dtype='float32',crs=crs_proj, transform=transform) as dst:
+        dst.write(dsm_array, 1)
+    
+    return 0
 
 def global_dsm(tiles):
     """
@@ -494,14 +612,19 @@ def global_dsm(tiles):
                         "predictor": 2}
 
     dsms = []
+    dsms_fill = []
     confidence_maps = []
 
     for t in tiles:
 
+        d_f = os.path.join(t["dir"], "dsm_fill.tif")
         d = os.path.join(t["dir"], "dsm.tif")
         if os.path.exists(d):
-            dsms.append(d)
-
+            dsms.append(d)  
+                     
+        if os.path.exists(d):
+            dsms_fill.append(d_f)
+            
         c = os.path.join(t["dir"], "confidence.tif")
         if os.path.exists(c):
             confidence_maps.append(c)
@@ -514,7 +637,15 @@ def global_dsm(tiles):
                              indexes=[1],
                              dst_path=os.path.join(cfg["out_dir"], "dsm.tif"),
                              dst_kwds=creation_options)
-
+    if dsms_fill:
+        rasterio.merge.merge(dsms_fill,
+                             bounds=bounds,
+                             res=cfg["dsm_resolution"],
+                             nodata=np.nan,
+                             indexes=[1],
+                             dst_path=os.path.join(cfg["out_dir"], "dsm_fill.tif"),
+                             dst_kwds=creation_options)
+        
     if confidence_maps:
         rasterio.merge.merge(confidence_maps,
                              bounds=bounds,
@@ -541,7 +672,7 @@ def main(user_cfg, start_from=0):
     nb_workers = multiprocessing.cpu_count()  # nb of available cores
     if cfg['max_processes'] is not None:
         nb_workers = cfg['max_processes']
-
+  
     tw, th = initialization.adjust_tile_size()
     tiles_txt = os.path.join(cfg['out_dir'], 'tiles.txt')
     tiles = initialization.tiles_full_info(tw, th, tiles_txt, create_masks=True)
@@ -580,7 +711,7 @@ def main(user_cfg, start_from=0):
         parallel.launch_calls(rectification_pair, tiles_pairs, nb_workers,
                               timeout=timeout)
 
-    # matching step:
+    # matching step:密集匹配
     if start_from <= 4:
         print('4) running stereo matching...')
         if cfg['max_processes_stereo_matching'] is not None:
@@ -589,7 +720,7 @@ def main(user_cfg, start_from=0):
             nb_workers_stereo = nb_workers
         parallel.launch_calls(stereo_matching, tiles_pairs, nb_workers_stereo,
                               timeout=timeout)
-
+    # 视差图->稠密点云
     if start_from <= 5:
         if n > 2:
             # disparity-to-height step:
@@ -615,9 +746,11 @@ def main(user_cfg, start_from=0):
                                   timeout=timeout)
 
     # local-dsm-rasterization step:
+    # 点云生成DSM
     if start_from <= 6:
         print('computing DSM by tile...')
         parallel.launch_calls(plys_to_dsm, tiles, nb_workers, timeout=timeout)
+        # parallel.launch_calls(pointsCloudToDSM, tiles, nb_workers, timeout=timeout)
 
     # global-dsm-rasterization step:
     if start_from <= 7:

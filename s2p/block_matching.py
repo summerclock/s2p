@@ -6,6 +6,7 @@
 import os
 import numpy as np
 import rasterio
+import math
 
 from s2p import common
 from s2p.config import cfg
@@ -334,3 +335,210 @@ def compute_disparity_map(im1, im2, disp, mask, algo, disp_min=None,
                                    'Correl_LeChantier_Num_5.tif')
         mask = os.path.join(work_dir, 'rectified_mask.png')
         common.run(["plambda", micmac_cost, "x x%q10 < 0 255 if", "-o", mask])
+
+from scipy.ndimage import gaussian_filter
+
+def insertDepth32f(disp,fill_disp):
+    # 使用rasterio库读取输入的深度地图文件
+    with rasterio.open(disp) as src:
+        depth = src.read(1)
+        
+    # 获取深度地图的高度和宽度
+    height, width = depth.shape
+
+    # 初始化两个全零矩阵，大小与深度地图相同
+    integralMap = np.zeros((height, width), dtype = np.float64)
+    ptsMap = np.zeros((height, width), dtype = np.int32)
+
+    # 创建一个掩码，标记出深度地图中有效的位置（即值不为NaN的位置）
+    validMask = ~np.isnan(depth)
+
+    # 在有效的位置上，将深度地图的值赋给integralMap，对应的ptsMap设为1
+    integralMap[validMask] = depth[validMask]
+    ptsMap[validMask] = 1
+
+    # 计算integralMap和ptsMap的垂直积分图
+    for i in range(1, height):
+        integralMap[i, :] += integralMap[i-1, :]
+        ptsMap[i, :] += ptsMap[i-1, :]
+
+    # 计算integralMap和ptsMap的水平积分图
+    for j in range(1, width):
+        integralMap[:, j] += integralMap[:, j-1]
+        ptsMap[:, j] += ptsMap[:, j-1]
+
+    # 定义滑动窗口的大小
+    dWnd = 8
+
+    # 当滑动窗口的大小大于1时，循环执行以下操作
+    while dWnd > 1:
+        # 定义当前窗口的大小
+        wnd = int(dWnd)
+        # 窗口大小减半
+        dWnd /= 2
+
+        # 滑动窗口遍历图像中的每个像素
+        for i in range(height):
+            for j in range(width):
+                # 定义窗口的边界
+                left = max(0, j - wnd - 1)
+                right = min(j + wnd, width - 1)
+                top = max(0, i - wnd - 1)
+                bot = min(i + wnd, height - 1)
+                
+                # 计算窗口内的有效像素点数量和灰度值的总和
+                ptsCnt = ptsMap[bot, right] + ptsMap[top, left] - (ptsMap[top, right] + ptsMap[bot, left])#有效像素数
+                sumGray = integralMap[bot, right] + integralMap[top, left] - (integralMap[top, right] + integralMap[bot, left])
+
+                # 如果当前窗口内没有有效的像素，跳过此轮循环
+                if ptsCnt <= 0:
+                    continue
+                
+                # 将深度图的相应位置设为窗口内的平均灰度值
+                depth[i, j] = sumGray / ptsCnt
+
+        # 对深度图进行高斯模糊处理
+        # s = wnd if wnd%2 == 1 else wnd+1
+        # depth = gaussian_filter(depth, sigma=s)
+    with rasterio.open(fill_disp, 'w', driver='GTiff', 
+                   height=depth.shape[0], 
+                   width=depth.shape[1], 
+                   count=1, 
+                   dtype=str(depth.dtype),
+                   crs=src.crs, 
+                   transform=src.transform) as dst:
+        dst.write(depth, 1)
+   
+def insertDepth32fMedian(disp, fill_disp):
+    
+    # 使用rasterio库读取输入的深度地图文件
+    with rasterio.open(disp) as src:
+        depth = src.read(1)
+        
+    # 获取深度地图的高度和宽度
+    height, width = depth.shape
+    
+    # 创建一个mask，nan值以外的地方不需要滤波处理
+    nan_mask = np.isnan(depth)
+    
+    # 初始化存储像素值的列表
+    pixelValues = []
+
+    # 定义滑动窗口的大小
+    dWnd = 6
+
+    # 当滑动窗口的大小大于1时，循环执行以下操作
+    while dWnd > 1:
+        # 定义当前窗口的大小
+        wnd = int(dWnd)
+        # 窗口大小减半
+        dWnd /= 2
+
+        # 滑动窗口遍历图像中的每个像素
+        for i in range(height):
+            for j in range(width):
+                 
+                # 如果当前深度图像素点不是空的，则跳过
+                if not np.isnan(depth[i, j]):
+                    continue
+                
+                # 定义窗口的边界
+                left = max(0, j - wnd - 1)
+                right = min(j + wnd, width - 1)
+                top = max(0, i - wnd - 1)
+                bot = min(i + wnd, height - 1)
+
+                # 从窗口内收集有效像素值
+                for x in range(left, right+1):
+                    for y in range(top, bot+1):
+                        if not np.isnan(depth[y, x]):
+                            pixelValues.append(depth[y, x])
+                            
+                            
+                # 如果当前窗口内有有效的像素，则取它们的中值
+                if pixelValues:
+                    depth[i, j] = np.median(pixelValues)
+
+                # 清空列表，以便下次使用
+                pixelValues.clear()
+        # 对深度图进行高斯模糊处理
+        s = wnd if wnd%2 == 1 else wnd+1
+        # depth = gaussian_filter(depth, sigma=s)
+        depth[nan_mask] = gaussian_filter(depth[nan_mask], sigma=s)
+    with rasterio.open(fill_disp, 'w', driver='GTiff', 
+                       height=depth.shape[0], 
+                       width=depth.shape[1], 
+                       count=1, 
+                       dtype=str(depth.dtype),
+                       crs=src.crs, 
+                       transform=src.transform) as dst:
+        dst.write(depth, 1)   
+
+    # 使用rasterio库读取输入的深度地图文件
+    with rasterio.open(disp) as src:
+        depth = src.read(1)
+        
+    # 获取深度地图的高度和宽度
+    height, width = depth.shape
+
+    # 初始化存储像素值的列表
+    pixelValues = []
+
+    # 定义滑动窗口的大小
+    dWnd = 8
+
+    # 创建和输入深度图相同的掩码，先进行初始化为False
+    mask = np.zeros_like(depth, dtype=bool)
+
+    # 当滑动窗口的大小大于1时，循环执行以下操作
+    while dWnd > 1:
+        # 定义当前窗口的大小
+        wnd = int(dWnd)
+        # 窗口大小减半
+        dWnd /= 2
+
+        # 滑动窗口遍历图像中的每个像素
+        for i in range(height):
+            for j in range(width):
+                 
+                # 如果当前深度图像素点不是空的，则跳过
+                if not np.isnan(depth[i, j]):
+                    continue
+
+                # 此位置需要应用高斯模糊，更新mask
+                mask[i, j] = True
+                
+                # 定义窗口的边界
+                left = max(0, j - wnd - 1)
+                right = min(j + wnd, width - 1)
+                top = max(0, i - wnd - 1)
+                bot = min(i + wnd, height - 1)
+
+                # 从窗口内收集有效像素值
+                for x in range(left, right+1):
+                    for y in range(top, bot+1):
+                        if not np.isnan(depth[y, x]):
+                            pixelValues.append(depth[y, x])
+                            
+                # 如果当前窗口内有有效的像素，则取它们的中值
+                if pixelValues:
+                    depth[i, j] = np.median(pixelValues)
+
+                # 清空列表，以便下次使用
+                pixelValues.clear()
+
+        # 对深度图进行高斯模糊处理
+        s = wnd if wnd%2 == 1 else wnd+1
+        blurred = gaussian_filter(depth, sigma=s)
+
+        # 只在mask为True的地方应用高斯模糊
+        depth[mask] = blurred[mask]
+
+    with rasterio.open(fill_disp, 'w', driver='GTiff', 
+                       height=depth.shape[0], 
+                       width=depth.shape[1], 
+                       count=1, 
+                       dtype=str(depth.dtype),
+                       crs=src.crs, 
+                       transform=src.transform) as dst:
+        dst.write(depth, 1)
