@@ -457,7 +457,7 @@ void eval_rpc_pair(double xprime[2],
 		double x, double y, double z)
 {
 	double tmp[2];
-	eval_rpc(tmp, pa, x, y, z);
+	eval_rpc(tmp, pa, x, y, z);//  rpc
 	eval_rpci(xprime, pb, tmp[0], tmp[1], z);
 }
 

@@ -262,6 +262,7 @@ def matches_on_rpc_roi(im1, im2, rpc1, rpc2, x, y, w, h,
     x2, y2, w2, h2 = rpc_utils.corresponding_roi(rpc1, rpc2, x, y, w, h)
 
     # estimate an approximate affine fundamental matrix from the rpcs
+    #根据匹配点估计两张图像的基本矩阵，基本矩阵中包含两个图像的运动关系
     rpc_matches = rpc_utils.matches_from_rpc(rpc1, rpc2, x, y, w, h, 5)
     F = estimation.affine_fundamental_matrix(rpc_matches)
 
