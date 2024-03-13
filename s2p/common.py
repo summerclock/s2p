@@ -293,5 +293,10 @@ def linear_stretching_and_quantization_8bit(img, p=1):
     Returns:
         numpy array with the quantized uint8 image
     """
+     # Replace NaN values with a suitable replacement (e.g., 0)by cmj
+    if np.isnan(img).any():
+        # If img contains NaN values, replace them with a suitable value
+        img = np.nan_to_num(img, nan=0)
+    
     a, b = np.nanpercentile(img, (p, 100 - p))
     return np.round(255 * (np.clip(img, a, b) - a) / (b - a)).astype(np.uint8)
