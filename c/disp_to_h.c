@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <math.h>
 
+
 #include "iio.h"
 #include "rpc.h"
 #include "fail.c"
@@ -66,7 +67,7 @@ void stereo_corresp_to_lonlatalt(double *lonlatalt, float *err,  // outputs
     }
 }
 
-
+//视差图转到经纬高
 void disp_to_lonlatalt(double *lonlatalt, float *err,  // outputs
                  float *dispx, float *dispy, float *msk, int nx, int ny,  // inputs
                  float *msk_orig, int w, int h,
@@ -128,8 +129,8 @@ void disp_to_lonlatalt(double *lonlatalt, float *err,  // outputs
         double dy = dispy[pix];
         double b[2] = {col + dx, row + dy};
         apply_homography(q, hb_inv, b);
-        z = rpc_height(rpca, rpcb, p[0], p[1], q[0], q[1], &e);
-        eval_rpc(lonlat, rpca, p[0], p[1], z);
+        z = rpc_height(rpca, rpcb, p[0], p[1], q[0], q[1], &e);//根据视差计算高度
+        eval_rpc(lonlat, rpca, p[0], p[1], z);//p是左图像坐标
 
         // store the output values
         lonlatalt[3 * pix + 0] = lonlat[0];
@@ -139,6 +140,115 @@ void disp_to_lonlatalt(double *lonlatalt, float *err,  // outputs
     }
 }
 
+//视差图转到经纬高（计算重投影误差）
+void disp_to_lonlatalt_project(double *lonlatalt, float *err,  float *rep_err,// outputs
+                 float *dispx, float *dispy, float *msk, int nx, int ny,  // inputs
+                 float *msk_orig, int w, int h,
+                 double ha[9], double hb[9],
+                 struct rpc *rpca, struct rpc *rpcb,
+                 float orig_img_bounding_box[4])
+{
+    // invert homographies
+    double ha_inv[9];
+    double hb_inv[9];
+    invert_homography(ha_inv, ha);
+    invert_homography(hb_inv, hb);
+
+    // read image bounding box,原始影像的范围
+    float col_min = orig_img_bounding_box[0];
+    float col_max = orig_img_bounding_box[1];
+    float row_min = orig_img_bounding_box[2];
+    float row_max = orig_img_bounding_box[3];
+
+    // initialize output images to nan
+    for (int row = 0; row < ny; row++)
+    for (int col = 0; col < nx; col++) {
+        int pix = col + nx*row;
+        err[pix] = NAN;
+        rep_err[pix] = NAN;
+        for (int k = 0; k < 3; k++)
+            lonlatalt[3 * pix + k] = NAN;
+    }
+
+    // intermediate buffers
+    double p[2], q[2], lonlat[2];
+    double e, z;
+ 
+//  重投影误差
+    double a_r[2]={0,0};   
+    double b_r[2]={0,0};   
+
+    // loop over all the pixels of the input disp map
+    // a 3D point is produced for each non-masked disparity
+    for (int row = 0; row < ny; row++)
+    for (int col = 0; col < nx; col++) {
+        int pix = col + nx*row;
+        if (!msk[pix])
+            continue;
+
+        // compute coordinates of pix in the full reference image
+        double a[2] = {col, row};
+        apply_homography(p, ha_inv, a);
+
+        // check that it lies in the image domain bounding box
+        if (round(p[0]) < col_min || round(p[0]) > col_max ||
+            round(p[1]) < row_min || round(p[1]) > row_max)
+            continue;
+
+        // check that it passes the image domain mask
+        int x = (int) round(p[0]) - col_min;
+        int y = (int) round(p[1]) - row_min;
+        if ((x < w) && (y < h))
+            if (!msk_orig[y * w + x])
+                continue;
+
+        // compute (lon, lat, alt) of the 3D point
+        double dx = dispx[pix];
+        double dy = dispy[pix];
+        double b[2] = {col + dx, row + dy};
+        apply_homography(q, hb_inv, b);
+        z = rpc_height(rpca, rpcb, p[0], p[1], q[0], q[1], &e);//根据视差计算高度
+        eval_rpc(lonlat, rpca, p[0], p[1], z);//p是左图像坐标
+
+        // store the output values
+        lonlatalt[3 * pix + 0] = lonlat[0];
+        lonlatalt[3 * pix + 1] = lonlat[1];
+        lonlatalt[3 * pix + 2] = z;
+        err[pix] = e;
+             
+        //重投影误差计算
+        eval_rpci(a_r, rpca, lonlat[0], lonlat[1], lonlat[2]);
+        eval_rpci(b_r, rpcb, lonlat[0], lonlat[1], lonlat[2]);
+        // fprintf(stdout, "p[0] p[1] q[0] q[1]:\n\t"
+        //            "%f "
+        //            "%f "
+        //            "%f "
+        //            "%f "
+        //         "\n",p[0], p[1], q[0], q[1]);
+
+        // // fprintf(stdout, "row col:\n\t"
+        // //            "%d "
+        // //            "%d "
+        // //         "\n", row,col);
+        // fprintf(stdout, "pa:\n\t"
+        //            "%f "
+        //            "%f "
+        //         "\n", a_r[0], a_r[1]);
+        // fprintf(stdout, "pb:\n\t"
+        //            "%f "
+        //            "%f "
+        //         "\n", b_r[0], b_r[1]);
+
+                // fprintf(stdout, "p[0] p[1] q[0] q[1]:\n\t"
+                //    "%f "
+                //    "%f "
+                //    "%f "
+                //    "%f "
+                // "\n",p[0]-a_r[0], p[1]-a_r[1], q[0]-b_r[0], q[1]-b_r[1]);
+        float reproject = (sqrt(a_r[0]*a_r[0] +a_r[1]*a_r[1])+sqrt(b_r[0]*b_r[0] +b_r[1]*b_r[1]))/2.0;
+        rep_err[pix] = reproject; 
+    }
+}
 
 float squared_distance_between_3d_points(double a[3], double b[3])
 {
@@ -228,6 +338,7 @@ void remove_isolated_3d_points(
     free(rejected);
     free(count);
 }
+
 
 
 static void help(char *s)

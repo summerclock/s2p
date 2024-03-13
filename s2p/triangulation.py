@@ -10,6 +10,8 @@ import numpy as np
 from scipy import ndimage
 import rasterio
 
+import pcl
+
 from s2p import common
 from s2p.config import cfg
 from s2p import ply
@@ -117,7 +119,21 @@ def disp_to_xyz(rpc1, rpc2, H1, H2, disp, mask_rect, img_bbx, mask_orig, A=None,
     # define the argument types of the disp_to_lonlatalt function from disp_to_h.so
     h, w = disp.shape
     hh, ww = mask_orig.shape
-    lib.disp_to_lonlatalt.argtypes = (ndpointer(dtype=c_double, shape=(h, w, 3)),
+    # lib.disp_to_lonlatalt.argtypes = (ndpointer(dtype=c_double, shape=(h, w, 3)),
+    #                                   ndpointer(dtype=c_float, shape=(h, w)),
+    #                                   ndpointer(dtype=c_float, shape=(h, w)),
+    #                                   ndpointer(dtype=c_float, shape=(h, w)),
+    #                                   ndpointer(dtype=c_float, shape=(h, w)),
+    #                                   c_int, c_int,
+    #                                   ndpointer(dtype=c_float, shape=(hh, ww)),
+    #                                   c_int, c_int,
+    #                                   ndpointer(dtype=c_double, shape=(9,)),
+    #                                   ndpointer(dtype=c_double, shape=(9,)),
+    #                                   POINTER(RPCStruct), POINTER(RPCStruct),
+    #                                   ndpointer(dtype=c_float, shape=(4,)))
+
+    lib.disp_to_lonlatalt_project.argtypes = (ndpointer(dtype=c_double, shape=(h, w, 3)),
+                                      ndpointer(dtype=c_float, shape=(h, w)),
                                       ndpointer(dtype=c_float, shape=(h, w)),
                                       ndpointer(dtype=c_float, shape=(h, w)),
                                       ndpointer(dtype=c_float, shape=(h, w)),
@@ -130,20 +146,37 @@ def disp_to_xyz(rpc1, rpc2, H1, H2, disp, mask_rect, img_bbx, mask_orig, A=None,
                                       POINTER(RPCStruct), POINTER(RPCStruct),
                                       ndpointer(dtype=c_float, shape=(4,)))
 
-
     # call the disp_to_lonlatalt function from disp_to_h.so
     lonlatalt = np.zeros((h, w, 3), dtype='float64')
     err = np.zeros((h, w), dtype='float32')
+    project_err = np.zeros((h, w), dtype='float32')
     dispx = disp.astype('float32')
     dispy = np.zeros((h, w), dtype='float32')
     msk_rect = mask_rect.astype('float32')
     msk_orig = mask_orig.astype('float32')
-    lib.disp_to_lonlatalt(lonlatalt, err, dispx, dispy, msk_rect, w, h,
+    # lib.disp_to_lonlatalt(lonlatalt, err, dispx, dispy, msk_rect, w, h,
+    #                       msk_orig, ww, hh,
+    #                       H1.flatten(), H2.flatten(),
+    #                       byref(rpc1_c_struct), byref(rpc2_c_struct),
+    #                       np.asarray(img_bbx, dtype='float32'))
+
+    lib.disp_to_lonlatalt_project(lonlatalt, err,project_err, dispx, dispy, msk_rect, w, h,
                           msk_orig, ww, hh,
                           H1.flatten(), H2.flatten(),
                           byref(rpc1_c_struct), byref(rpc2_c_struct),
                           np.asarray(img_bbx, dtype='float32'))
+   
+    max_value = np.nanmax(project_err)
+    min_value = np.nanmin(project_err)
 
+    print('Max project error value (ignoring NaN values):', max_value)
+    print('Min project error value (ignoring NaN values):', min_value)
+    max_value = np.nanmax(err)
+    min_value = np.nanmin(err)
+
+    print('Max trigulate error value (ignoring NaN values):', max_value)
+    print('Min trigulate error value (ignoring NaN values):', min_value)
+    
     # output CRS conversion
     in_crs = geographiclib.pyproj_crs("epsg:4979")
 
@@ -159,7 +192,18 @@ def disp_to_xyz(rpc1, rpc2, H1, H2, disp, mask_rect, img_bbx, mask_orig, A=None,
     else:
         xyz_array = lonlatalt
 
-    return xyz_array, err
+    filter_err_xyz_array = filter_xyz_by_error(xyz_array,err)
+    
+    filter_projerr_xyz_array = filter_xyz_by_error(xyz_array,project_err)
+    
+    num = np.sum(np.isnan(xyz_array))
+    num_filtered_err = num - np.sum(np.isnan(filter_err_xyz_array))
+    num_filtered_projerr = np.sum(np.isnan(filter_projerr_xyz_array))-np.sum(np.isnan(filter_err_xyz_array))
+    print('Number of points total:', num)
+    print('Number of points filtered by error:', num_filtered_err)
+    print('Number of points filtered by projection error:', num_filtered_projerr)
+    
+    return filter_projerr_xyz_array, err
 
 
 def height_map_to_xyz(heights, rpc, off_x=0, off_y=0, out_crs=None):
@@ -427,3 +471,125 @@ def write_to_ply(path_to_ply_file, xyz, colors=None, proj_com='', confidence='')
                                     extra_properties_names=extra_names,
                                     comments=["created by S2P",
                                               "projection: {}".format(proj_com)])
+
+# 统计滤波
+def points_cloud_filter(points):
+    '''Applies statistical outlier removal filter to point cloud.
+    Args:
+    cloud (pcl.PointCloud object): Input cloud.
+    Returns:
+    pcl.PointCloud object: Filtered point cloud.
+    '''
+    # Subtract the center value
+    center = np.mean(points, axis=0)
+    points -= center 
+
+    # Select the first three columns corresponding to x, y, z
+    points = points[:,:3]
+
+    # Convert to pcl type
+    cloud = pcl.PointCloud()
+    cloud.from_array(points.astype(np.float32))
+
+    # Create a filter object
+    sor = cloud.make_statistical_outlier_filter()
+
+    # Set the number of neighboring points to use for mean distance estimation
+    sor.set_mean_k(50)
+
+    # Set threshold scale factor
+    sor.set_std_dev_mul_thresh(3)
+
+    # Call the filter function
+    cloud_filtered = sor.filter()
+
+    # Get the numpy array of points from the filtered cloud
+    points_filtered = cloud_filtered.to_array()
+
+    # Add the center value back to the points
+    
+    points_filtered += center[:3]
+    # Reshape the points back to original shape
+    return points_filtered
+
+#根据误差来过滤点
+def filter_xyz_by_error(xyz_array, err_array):
+    if np.all(np.isnan(err_array)):
+        return xyz_array
+    # 计算非NaN值的均方根误差
+    err_valid = err_array[np.isfinite(err_array)] 
+    rmse = np.sqrt(np.mean(err_valid**2))
+    
+    # 找出误差大于均方根误差两倍的位置
+    mask = np.abs(err_array) > rmse * 2
+    
+    # 将xyz_array中对应位置设为NaN
+    xyz_filtered = np.where(np.repeat(mask[:, :, np.newaxis], xyz_array.shape[2], axis=2),
+                            np.nan, xyz_array)
+    
+    return xyz_filtered
+
+
+# def PLYandVISStatisticalOutlierRemoval(points):
+#      # Subtract the center value
+#     # Subtract the center value
+#     center = np.mean(points, axis=0)
+#     points -= center 
+
+#     # Select the first three columns corresponding to x, y, z
+#     points = points[:,:3]
+
+#     # Convert to pcl type
+#     cloud = pcl.PointCloud()
+#     cloud.from_array(points.astype(np.float32))
+
+#     # Create a filter object
+#     sor = cloud.make_statistical_outlier_filter()
+
+#     # Set the number of neighboring points to use for mean distance estimation
+#     sor.set_mean_k(50)
+
+#     # Set threshold scale factor
+#     sor.set_std_dev_mul_thresh(3)
+    
+#     # Call the filter function
+#     cloud_filtered = sor.filter()
+
+#     sor.set_negative(True)
+    
+#     sor.get_removed_indices()
+    
+#     # Get the numpy array of points from the filtered cloud
+#     points_filtered = cloud_filtered.to_array()
+
+#     # Add the center value back to the points
+    
+#     points_filtered += center[:3]
+    
+
+    
+    
+    
+#     sor = pcl.filters.StatisticalOutlierRemoval.PointXYZRGBNormal()
+#     sor.setInputCloud(in_cloud)
+#     sor.setMeanK(30)
+#     sor.setStddevMulThresh(3)
+#     filtered_cloud = pcl.PointCloud.PointXYZRGBNormal()
+#     sor.filter(filtered_cloud)
+
+#     sor.setNegative(True)
+#     removed_cloud = pcl.PointCloud.PointXYZRGBNormal()
+#     sor.filter(removed_cloud)
+
+#     removedIdx = np.asarray(removed_cloud.xyz)
+#     removedIdx_sort = np.sort(removedIdx, axis=0)[::-1]
+
+#     hash_set = set(removedIdx_sort)
+
+#     filter_VIS = []
+
+#     for num in range(in_VIS.shape[0]):
+#         if num not in hash_set:
+#             filter_VIS.append(in_VIS[num])
+
+#     return filtered_cloud, np.array(filter_VIS)
