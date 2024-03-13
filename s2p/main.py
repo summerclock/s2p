@@ -126,7 +126,7 @@ def generate_dsm(config_file, absmean_tol=0.025, percentile_tol=1.):
     if 'out_crs' in s2p.cfg: del s2p.cfg['out_crs']
 
     test_cfg = s2p.read_config_file(config_file)
-    s2p.main(test_cfg, 5)
+    s2p.main(test_cfg)
 
     outdir = test_cfg['out_dir']
 
