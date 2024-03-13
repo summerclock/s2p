@@ -1,0 +1,48 @@
+{
+    "name": "s2p",
+    "build": {
+            "dockerfile": "Dockerfile",
+            "context": ".."
+    },
+    "mounts": [
+            "src=/home/td/gzw,dst=/root/td/gzw,type=bind",
+            // "src=/mnt/c,dst=/mnt/c,type=bind",
+            // "src=/mnt/d,dst=/mnt/d,type=bind",
+            // "src=/home/gzw/.cache/vcpkg/archives,dst=/root/.cache/vcpkg/archives,type=bind",
+            "src=/tmp/.X11-unix,dst=/tmp/.X11-unix,type=bind"
+    ],
+    "customizations": {
+            "vscode": {
+                    "extensions": [
+                            "llvm-vs-code-extensions.vscode-clangd",
+                            "twxs.cmake",
+                            "ms-vscode.cmake-tools",
+                            "vadimcn.vscode-lldb",
+                            "vivaxy.vscode-conventional-commits",
+                            "Guyutongxue.cpp-reference",
+                            "GitHub.vscode-pull-request-github",
+                            "donjayamanne.githistory"
+                    ]
+            }
+    },
+    "containerEnv": {
+            // "HTTPS_PROXY": "http://172.25.0.1:7890",
+            "VCPKG_BINARY_CACHE": "/root/.cache/vcpkg/archives",
+            "DISPLAY": "${localEnv:DISPLAY}"
+    },
+    // Features to add to the dev container. More info: https://containers.dev/features.
+    // "features": {},
+    // Use 'forwardPorts' to make a list of ports inside the container available locally.
+    // "forwardPorts": [],
+    "postCreateCommand": "git config --global user.name summerclock; git config --global user.email gzw9911@outlook.com",
+    "runArgs": [
+            "--gpus",
+            "all,\"capabilities=compute,utility\"",
+            "--ipc=host",
+            "--network=host"
+    ]
+    // Configure tool-specific properties.
+    // "customizations": {},
+    // Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+    // "remoteUser": "root"
+}
